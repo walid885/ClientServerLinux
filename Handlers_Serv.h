@@ -1,26 +1,27 @@
-#ifndef SERV_CLI_FIFO_H
-#define SERV_CLI_FIFO_H
+#ifndef HANDLERS_SERV_H
+#define HANDLERS_SERV_H
 
-#include <sys/types.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
+#include <signal.h>
 
-// Constantes et macros communes
-#define NMAX 10 // Nombre maximum de nombres aléatoires
-#define FIFO1 "/tmp/fifo1" // Nom du tube nommé pour les questions
-#define FIFO2 "/tmp/fifo2" // Nom du tube nommé pour les réponses
+// Variable globale pour indiquer que le serveur doit continuer
+extern int encore;
 
-// Structure de la question
-typedef struct {
-    int client_id; // Numéro du client
-    int n; // Nombre de nombres aléatoires demandés
-} question_t;
+/**
+ * Gestionnaire du signal SIGUSR1 pour le réveil du serveur.
+ * @param sig Le signal reçu (SIGUSR1).
+ */
+void hand_reveil(int sig) {
+    // Indique que le serveur doit continuer
+    encore = 1;
+}
 
-// Structure de la réponse
-typedef struct {
-    int client_id; // Numéro du client
-    int nombres[NMAX]; // Tableau des nombres aléatoires
-    int n; // Nombre de nombres aléatoires
-} reponse_t;
+/**
+ * Gestionnaire des signaux pour la fin du serveur.
+ * @param sig Le signal reçu (peu importe lequel).
+ */
+void fin_serveur(int sig) {
+    // Indique que le serveur doit s'arrêter
+    encore = 0;
+}
 
-#endif // SERV_CLI_FIFO_H
+#endif // HANDLERS_SERV_H
