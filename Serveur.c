@@ -29,7 +29,9 @@ int main() {
 
     while (1) {
         // Lire la question du client dans fifo1
+        printf("Serveur : En attente d'une question dans FIFO1...\n");
         read(fifo1, &question, sizeof(question_t));
+        printf("Serveur : Question reçue du client %d (demande %d nombres)\n", question.client_id, question.n);
 
         // Générer les nombres aléatoires
         reponse.client_id = question.client_id;
@@ -39,12 +41,15 @@ int main() {
         }
 
         // Écrire la réponse dans fifo2
+        printf("Serveur : Écriture de la réponse dans FIFO2...\n");
         write(fifo2, &reponse, sizeof(reponse_t));
 
         // Réveiller le client
+        printf("Serveur : Réveil du client %d avec le signal SIGUSR1\n", question.client_id);
         kill(question.client_id, SIGUSR1);
 
         // Attendre le réveil du client
+        printf("Serveur : En attente du réveil du client %d\n", question.client_id);
         pause();
     }
 
