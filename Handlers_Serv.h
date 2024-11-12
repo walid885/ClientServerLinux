@@ -4,8 +4,7 @@
 #include <signal.h>
 
 // Variable globale pour indiquer que le serveur doit continuer
-extern int encore;
-
+static int encore=0 ;
 /**
  * Gestionnaire du signal SIGUSR1 pour le réveil du serveur.
  * @param sig Le signal reçu (SIGUSR1).
