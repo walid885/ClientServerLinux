@@ -27,7 +27,7 @@ void handle_sigusr1(int signo) {
 // Fonction pour afficher l'heure actuelle
 void print_timestamp() {
     time_t now = time(NULL);
-    printf("[%ld] ", now);
+    printf("[%ld timestamp] ", now);
 }
 
 int main(int argc, char *argv[]) {
