@@ -18,7 +18,7 @@ int main() {
     // Créer les tubes nommés
     mkfifo(FIFO1, 0666);
     mkfifo(FIFO2, 0666);
-
+srand(getpid());
     // Ouvrir les tubes nommés
     fifo1 = open(FIFO1, O_RDONLY);
     fifo2 = open(FIFO2, O_WRONLY);
