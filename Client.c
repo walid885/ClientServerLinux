@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -14,18 +15,18 @@
 #include <string.h>
 #include "serv_cli_fifo.h"
 
-// Variable globale pour le suivi
+// Global variable for signal handling
 volatile sig_atomic_t signal_recu = 0;
 
-// Gestionnaire de signal pour SIGUSR1
+// Signal handler for SIGUSR1
 void handle_sigusr1(int signo) {
     if (signo == SIGUSR1) {
-        printf("[CLIENT %d][%ld] Signal SIGUSR1 reçu\n", getpid(), time(NULL));
+        printf("[CLIENT %d][%ld] Signal SIGUSR1 received\n", getpid(), time(NULL));
         signal_recu = 1;
     }
 }
 
-// Fonction pour afficher l'heure actuelle
+// Function to print the current timestamp
 void print_timestamp() {
     time_t now = time(NULL);
     printf("[%ld timestamp] ", now);
@@ -38,174 +39,141 @@ int main(int argc, char *argv[]) {
     int registry_fd, fd_in, fd_out;
     question_t question;
     reponse_t reponse;
-    char fifo_in[128], fifo_out[128];
+
     pid_t pid = getpid();
 
-    // Construction des noms de FIFO pour ce client
-    snprintf(fifo_in, sizeof(fifo_in), "%s%d_in", FIFO_BASE, pid);
-    snprintf(fifo_out, sizeof(fifo_out), "%s%d_out", FIFO_BASE, pid);
-
-    // Configuration du gestionnaire de signal
+    // Configuration of signal handler
     struct sigaction sa;
     sa.sa_handler = handle_sigusr1;
     sa.sa_flags = 0;
-    sigemptyset(&sa.sa_mask);
 
-    if (sigaction(SIGUSR1, &sa, NULL) == -1) {
-        print_timestamp();
-        perror("[CLIENT] Erreur configuration signal SIGUSR1");
-        exit(EXIT_FAILURE);
-    }
+	sigemptyset(&sa.sa_mask);
 
-    print_timestamp();
-    printf("[CLIENT %d] Démarrage du client\n", pid);
+	if(sigaction(SIGUSR1,&sa,NULL)==-1){
+		print_timestamp();
+		perror("[CLIENT] Error configuring signal SIGUSR1");
+		exit(EXIT_FAILURE);
+	}
 
-    // Création des FIFOs client
-    if (mkfifo(fifo_in, 0666) == -1 && errno != EEXIST) {
-        print_timestamp();
-        perror("[CLIENT] Erreur création FIFO in");
-        exit(EXIT_FAILURE);
-    }
+	print_timestamp();
+	printf("[CLIENT %d] Starting client\n", pid);
 
-    if (mkfifo(fifo_out, 0666) == -1 && errno != EEXIST) {
-        print_timestamp();
-        perror("[CLIENT] Erreur création FIFO out");
-        unlink(fifo_in);
-        exit(EXIT_FAILURE);
-    }
+	// Open the registry FIFO for registration with the server.
+	print_timestamp();
+	printf("[CLIENT %d] Attempting to open registry (%s)\n", pid,SERVER_REGISTRY);
 
-    // Ouverture du FIFO registry pour enregistrement auprès du serveur
-    print_timestamp();
-    printf("[CLIENT %d] Tentative d'ouverture du registry (%s)\n", pid, SERVER_REGISTRY);
-    
-    registry_fd = open(SERVER_REGISTRY, O_WRONLY);
-    if (registry_fd == -1) {
-        print_timestamp();
-        perror("[CLIENT] Échec ouverture registry");
-        unlink(fifo_in);
-        unlink(fifo_out);
-        exit(EXIT_FAILURE);
-    }
+	registry_fd=open(SERVER_REGISTRY,O_WRONLY);
 
-    // Envoi du PID au serveur via le registry
-    if (write(registry_fd, &pid, sizeof(pid_t)) == -1) {
-        print_timestamp();
-        perror("[CLIENT] Échec envoi PID au registry");
-        close(registry_fd);
-        unlink(fifo_in);
-        unlink(fifo_out);
-        exit(EXIT_FAILURE);
-    }
-    close(registry_fd);
+	if(registry_fd==-1){
+		print_timestamp();
+		perror("[CLIENT] Failed to open registry");
+		exit(EXIT_FAILURE);	
+	}
 
-    // Ouverture des FIFOs client
-    print_timestamp();
-    printf("[CLIENT %d] Tentative d'ouverture du FIFO in (%s)\n", pid, fifo_in);
-    
-    fd_in = open(fifo_in, O_RDONLY);
-    if (fd_in == -1) {
-        print_timestamp();
-        perror("[CLIENT] Échec ouverture FIFO in");
-        unlink(fifo_in);
-        unlink(fifo_out);
-        exit(EXIT_FAILURE);
-    }
+	// Send PID to the server via the registry.
+	if(write(registry_fd,&pid,sizeof(pid_t))==-1){
+		print_timestamp();
+		perror("[CLIENT] Failed to send PID to registry");
+		close(registry_fd);
+		exit(EXIT_FAILURE);	
+	}
+	
+	close(registry_fd);
 
-    print_timestamp();
-    printf("[CLIENT %d] Tentative d'ouverture du FIFO out (%s)\n", pid, fifo_out);
-    
-    fd_out = open(fifo_out, O_WRONLY);
-    if (fd_out == -1) {
-        print_timestamp();
-        perror("[CLIENT] Échec ouverture FIFO out");
-        close(fd_in);
-        unlink(fifo_in);
-        unlink(fifo_out);
-        exit(EXIT_FAILURE);
-    }
+	char fifo_in[128], fifo_out[128];
 
-    // Initialisation du générateur de nombres aléatoires
-    srand(time(NULL) + pid);
+	snprintf(fifo_in,sizeof(fifo_in),"%s%d_in",FIFO_BASE,pid); 
+	snprintf(fifo_out,sizeof(fifo_out),"%s%d_out",FIFO_BASE,pid); 
 
-    // Préparation de la question
-    question.client_id = pid;
-    question.n = rand() % NMAX + 1;
+	int attempts=0;
 
-    print_timestamp();
-    printf("[CLIENT %d] Préparation de la demande: %d nombres aléatoires\n", 
-           question.client_id, question.n);
+	while(attempts<10){ 
+		fd_in=open(fifo_in,O_RDONLY|O_NONBLOCK); 
+		if(fd_in!=-1){ 
+			break; 
+		}
+		
+		print_timestamp();
+		printf("[CLIENT %d] Waiting for FIFO in (%s)...\n",pid,fifo_in); 
+		sleep(1); 
+		attempts++; 
+	}
 
-    // Envoi de la question
-    ssize_t write_result = write(fd_out, &question, sizeof(question_t));
-    if (write_result == -1) {
-        print_timestamp();
-        perror("[CLIENT] Erreur envoi question");
-        close(fd_in);
-        close(fd_out);
-        unlink(fifo_in);
-        unlink(fifo_out);
-        exit(EXIT_FAILURE);
-    }
-    print_timestamp();
-    printf("[CLIENT %d] Question envoyée avec succès (%zd bytes)\n", 
-           question.client_id, write_result);
+	if(fd_in==-1){ 
+		print_timestamp(); 
+		perror("[CLIENT] Failed to open FIFO in after waiting"); 
+		exit(EXIT_FAILURE); 
+	} 
 
-    // Attente du signal
-    print_timestamp();
-    printf("[CLIENT %d] En attente du signal du serveur...\n", question.client_id);
-    
-    while (!signal_recu) {
-        pause();
-    }
+	print_timestamp(); 
+	printf("[CLIENT %d] Successfully opened FIFO in (%s)\n",pid,fifo_in); 
 
-    // Lecture de la réponse
-    print_timestamp();
-    printf("[CLIENT %d] Tentative de lecture de la réponse\n", question.client_id);
-    
-    ssize_t read_result = read(fd_in, &reponse, sizeof(reponse_t));
-    if (read_result == -1) {
-        print_timestamp();
-        perror("[CLIENT] Erreur lecture réponse");
-        close(fd_in);
-        close(fd_out);
-        unlink(fifo_in);
-        unlink(fifo_out);
-        exit(EXIT_FAILURE);
-    }
-    print_timestamp();
-    printf("[CLIENT %d] Réponse reçue (%zd bytes)\n", question.client_id, read_result);
+	attempts=0; 
 
-    // Affichage de la réponse
-    print_timestamp();
-    printf("[CLIENT %d] Nombres reçus (%d): ", reponse.client_id, reponse.n);
-    for (int i = 0; i < reponse.n; i++) {
-        printf("%d ", reponse.nombres[i]);
-    }
-    printf("\n");
+	while(attempts<10){ 
+		fd_out=open(fifo_out,O_WRONLY|O_NONBLOCK); 
+		if(fd_out!=-1){ 
+			break; 
+		}
+		
+		print_timestamp(); 
+		printf("[CLIENT %d] Waiting for FIFO out (%s)...\n",pid,fifo_out); 
+		sleep(1); 
+		attempts++; 
+	}
 
-    // Envoi du signal de confirmation au serveur
-    print_timestamp();
-    printf("[CLIENT %d] Envoi du signal de confirmation au serveur\n", question.client_id);
-    
-    if (kill(reponse.client_id, SIGUSR1) == -1) {
-        print_timestamp();
-        perror("[CLIENT] Erreur envoi signal confirmation");
-    } else {
-        print_timestamp();
-        printf("[CLIENT %d] Signal de confirmation envoyé avec succès\n", question.client_id);
-    }
+	if(fd_out==-1){ 
+	    print_timestamp(); 
+	    perror("[CLIENT] Failed to open FIFO out after waiting"); 
+	    close(fd_in); exit(EXIT_FAILURE); 
+	  } 
 
-    // Nettoyage et fermeture
-    print_timestamp();
-    printf("[CLIENT %d] Fermeture des tubes\n", question.client_id);
-    
-    close(fd_in);
-    close(fd_out);
-    unlink(fifo_in);
-    unlink(fifo_out);
+	print_timestamp(); 
+	printf("[CLIENT %d] Successfully opened FIFO out (%s)\n",pid,fifo_out); 
 
-    print_timestamp();
-    printf("[CLIENT %d] Terminaison du client\n", question.client_id);
+	srand(time(NULL)+pid);
 
-    return EXIT_SUCCESS;
+	question.client_id=pid; 
+	question.n=rand()%NMAX+1;
+
+	print_timestamp(); 
+	printf("[CLIENT %d] Preparing request: %d random numbers\n",question.client_id,question.n);
+
+	ssize_t write_result=write(fd_out,&question,sizeof(question_t)); 
+
+	if(write_result==-1){ 
+	    print_timestamp(); 
+	    perror("[CLIENT] Error sending question"); 
+	    close(fd_in); close(fd_out); exit(EXIT_FAILURE);  
+	  } 
+
+	print_timestamp(); printf("[CLIENT %d] Question sent successfully (%zd bytes)\n",question.client_id,write_result);
+
+	print_timestamp(); printf("[CLIENT %d] Waiting for signal from server...\n",question.client_id);
+
+	while(!signal_recu){ pause(); } 
+
+	print_timestamp(); printf("[CLIENT %d] Attempting to read response\n",question.client_id);
+
+	ssize_t read_result=read(fd_in,&reponse,sizeof(reponse_t)); 
+
+	if(read_result==-1){ print_timestamp(); perror("[CLIENT] Error reading response"); close(fd_in); close(fd_out); exit(EXIT_FAILURE);} 
+
+	print_timestamp(); printf("[CLIENT %d] Response received (%zd bytes)\n",question.client_id,read_result);
+
+	print_timestamp(); printf("[CLIENT %d] Numbers received (%d): ",reponse.client_id,reponse.n); 
+
+	for(int i=0;i<reponse.n;i++){ printf("%d ",reponse.nombres[i]); } 
+
+	printf("\n");
+
+	print_timestamp(); printf("[CLIENT %d] Sending confirmation signal to server\n",question.client_id);
+
+	if(kill(reponse.client_id,SIGUSR1)==-1){ print_timestamp(); perror("[CLIENT] Error sending confirmation signal"); } else { print_timestamp(); printf("[CLIENT %d] Confirmation signal sent successfully\n",question.client_id);} 
+
+	print_timestamp(); printf("[CLIENT %d] Closing FIFOs\n",question.client_id); close(fd_in); close(fd_out);
+
+	print_timestamp(); printf("[CLIENT %d] Terminating client\n",question.client_id);
+
+	return EXIT_SUCCESS;  
 }

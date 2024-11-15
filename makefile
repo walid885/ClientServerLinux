@@ -25,7 +25,7 @@ $(EXEC_SERVEUR): Serveur.o
 # Règle pour nettoyer les fichiers générés
 clean:
 	rm -f $(OBJ) $(EXEC_CLIENT) $(EXEC_SERVEUR)
-	rm -f /tmp/fifo_client_*_in /tmp/fifo_client_*_out /tmp/server_registry
+	rm -f /tmp/fifo_client_*_in  /tmp/fifo_client_*_out /tmp/server_registry
 
 
 # Règle pour exécuter le serveur et le client (exécution séquentielle)
