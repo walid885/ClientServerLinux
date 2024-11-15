@@ -32,12 +32,10 @@ void cleanup_client(int idx) {
     }
 }
 
-
-
 void handle_client(int client_idx) {
     question_t question;
     reponse_t reponse;
-    
+
     // Read request
     ssize_t bytes_read = read(clients[client_idx].fd_in, &question, sizeof(question_t));
     if (bytes_read <= 0) {
@@ -93,7 +91,7 @@ int main() {
     sa.sa_handler = hand_reveil;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
-    
+
     if (sigaction(SIGUSR1, &sa, NULL) == -1) {
         perror("Server: Error setting up SIGUSR1 handler");
         exit(1);
@@ -105,8 +103,24 @@ int main() {
         exit(1);
     }
 
+    // Clean up existing FIFOs before starting
+    printf("Server: Cleaning up existing FIFOs...\n");
+    
+    unlink(SERVER_REGISTRY); // Ensure the registry FIFO is removed
+
+    // Clean up any existing client FIFOs before starting
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        char fifo_in[128], fifo_out[128];
+        snprintf(fifo_in, sizeof(fifo_in), "%s%d_in", FIFO_BASE, i);
+        snprintf(fifo_out, sizeof(fifo_out), "%s%d_out", FIFO_BASE, i);
+        
+        unlink(fifo_in); // Remove input FIFO if it exists
+        unlink(fifo_out); // Remove output FIFO if it exists
+    }
+
     // Create server registry FIFO
-    unlink(SERVER_REGISTRY);
+    printf("Server: Creating registry FIFO...\n");
+    
     if (mkfifo(SERVER_REGISTRY, 0666) == -1) {
         perror("Server: Error creating registry FIFO");
         exit(1);
@@ -116,81 +130,102 @@ int main() {
     
     // Open registry FIFO
     registry_fd = open(SERVER_REGISTRY, O_RDONLY | O_NONBLOCK);
+    
     if (registry_fd == -1) {
         perror("Server: Error opening registry FIFO");
         exit(1);
     }
+    
     // Initialize random number generator
     srand(time(NULL));
 
-    // Main server loop
-    while (running) {
-        fd_set readfds;
-        struct timeval tv = {1, 0};  // 1 second timeout
-        int max_fd = registry_fd;
+   // Main server loop
+   while (running) {
+       fd_set readfds;
+       struct timeval tv = {1, 0};  // 1 second timeout
+       int max_fd = registry_fd;
 
-        FD_ZERO(&readfds);
-        FD_SET(registry_fd, &readfds);
+       FD_ZERO(&readfds);
+       FD_SET(registry_fd, &readfds);
 
-        // Add active client FDs to set
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i].active) {
-                FD_SET(clients[i].fd_in, &readfds);
-                max_fd = (clients[i].fd_in > max_fd) ? clients[i].fd_in : max_fd;
-            }
-        }
+       // Add active client FDs to set
+       for (int i = 0; i < MAX_CLIENTS; i++) {
+           if (clients[i].active) {
+               FD_SET(clients[i].fd_in, &readfds);
+               max_fd = (clients[i].fd_in > max_fd) ? clients[i].fd_in : max_fd;
+           }
+       }
 
-        int ready = select(max_fd + 1, &readfds, NULL, NULL, &tv);
-        if (ready == -1 && errno != EINTR) {
-            perror("Server: Select error");
-            continue;
-        }
+       int ready = select(max_fd + 1, &readfds, NULL, NULL, &tv);
+       if (ready == -1 && errno != EINTR) {
+           perror("Server: Select error");
+           continue;
+       }
 
-        // Check for new client registrations
-        if (FD_ISSET(registry_fd, &readfds)) {
-            pid_t new_client_pid;
-            if (read(registry_fd, &new_client_pid, sizeof(pid_t)) > 0) {
-                if (nb_clients < MAX_CLIENTS) {
-                    // Find empty slot
-                    int idx = 0;
-                    while (idx < MAX_CLIENTS && clients[idx].active) idx++;
+       // Check for new client registrations
+       if (FD_ISSET(registry_fd, &readfds)) {
+           pid_t new_client_pid;
+           if (read(registry_fd, &new_client_pid, sizeof(pid_t)) > 0) {
+               if (nb_clients < MAX_CLIENTS) {
+                   // Find empty slot
+                   int idx = 0;
+                   while (idx < MAX_CLIENTS && clients[idx].active) idx++;
 
-                    if (idx < MAX_CLIENTS) {
-                        // Setup client FIFOs
-                        snprintf(clients[idx].fifo_in, sizeof(clients[idx].fifo_in),
+                   if (idx < MAX_CLIENTS) {
+                       // Setup client FIFOs
+                       snprintf(clients[idx].fifo_in, sizeof(clients[idx].fifo_in),
                                 "%s%d_in", FIFO_BASE, new_client_pid);
-                        snprintf(clients[idx].fifo_out, sizeof(clients[idx].fifo_out),
+                       snprintf(clients[idx].fifo_out, sizeof(clients[idx].fifo_out),
                                 "%s%d_out", FIFO_BASE, new_client_pid);
 
-                        // Open FIFOs
-                        clients[idx].fd_in = open(clients[idx].fifo_in, O_RDONLY | O_NONBLOCK);
-                        clients[idx].fd_out = open(clients[idx].fifo_out, O_WRONLY);
+                       printf("Server: Creating FIFOs for client PID %d...\n", new_client_pid);
 
-                        if (clients[idx].fd_in != -1 && clients[idx].fd_out != -1) {
-                            clients[idx].pid = new_client_pid;
-                            clients[idx].active = 1;
-                            nb_clients++;
-                            printf("Server: New client connected (PID: %d)\n", new_client_pid);
-                        }
-                    }
-                }
-            }
-        }
-        // Handle client requests
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i].active && FD_ISSET(clients[i].fd_in, &readfds)) {
-                handle_client(i);
-            }
-        }
-    }
+                       // Create FIFOs immediately after reading the PID
+                       if (mkfifo(clients[idx].fifo_in, 0666) == -1) {
+                           perror("Server: Error creating input FIFO");
+                           continue; // Skip to next iteration if FIFO creation fails
+                       }
 
-    // Cleanup
-    printf("Server: Shutting down...\n");
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        cleanup_client(i);
-    }
-    close(registry_fd);
-    unlink(SERVER_REGISTRY);
+                       if (mkfifo(clients[idx].fifo_out, 0666) == -1) {
+                           perror("Server: Error creating output FIFO");
+                           unlink(clients[idx].fifo_in); // Clean up input FIFO on error
+                           continue; // Skip to next iteration if FIFO creation fails
+                       }
 
-    return 0;
+                       // Open FIFOs in non-blocking mode
+                       clients[idx].fd_in = open(clients[idx].fifo_in, O_RDONLY | O_NONBLOCK);
+                       clients[idx].fd_out = open(clients[idx].fifo_out, O_WRONLY | O_NONBLOCK);
+
+                       if (clients[idx].fd_in != -1 && clients[idx].fd_out != -1) {
+                           clients[idx].pid = new_client_pid;
+                           clients[idx].active = 1;
+                           nb_clients++;
+                           printf("Server: New client connected (PID: %d)\n", new_client_pid);
+                       } else {
+                           perror("Server: Error opening FIFOs after creation");
+                           unlink(clients[idx].fifo_in); 
+                           unlink(clients[idx].fifo_out); 
+                       }
+                   }
+               }
+           }
+       }
+       
+       // Handle client requests
+       for (int i = 0; i < MAX_CLIENTS; i++) {
+           if (clients[i].active && FD_ISSET(clients[i].fd_in, &readfds)) {
+               handle_client(i);
+           }
+       }
+   }
+
+   // Cleanup
+   printf("Server: Shutting down...\n");
+   for (int i = 0; i < MAX_CLIENTS; i++) {
+       cleanup_client(i);
+   }
+   close(registry_fd);
+   unlink(SERVER_REGISTRY);
+
+   return 0;
 }
