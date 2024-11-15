@@ -11,193 +11,186 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
+#include <string.h>
 #include "serv_cli_fifo.h"
 #include "Handlers_Serv.h"
+#include <sys/select.h>
 
-// Structure pour suivre les clients actifs
-typedef struct {
-    pid_t pid;
-    int actif;
-} client_info_t;
-
-#define MAX_CLIENTS 10
-client_info_t clients[MAX_CLIENTS];
+client_connection_t clients[MAX_CLIENTS];
 volatile sig_atomic_t nb_clients = 0;
 
-// Gestionnaire pour SIGCHLD pour gérer la terminaison des processus fils
-void handle_sigchld(int sig) {
-    pid_t pid;
-    int status;
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        for (int i = 0; i < MAX_CLIENTS; i++) {
-            if (clients[i].pid == pid) {
-                clients[i].actif = 0;
-                nb_clients--;
-                printf("Serveur : Client %d terminé\n", pid);
-                break;
-            }
-        }
+void cleanup_client(int idx) {
+    if (clients[idx].active) {
+        close(clients[idx].fd_in);
+        close(clients[idx].fd_out);
+        unlink(clients[idx].fifo_in);
+        unlink(clients[idx].fifo_out);
+        clients[idx].active = 0;
+        clients[idx].pid = 0;
+        nb_clients--;
+        printf("Server: Client %d cleaned up\n", clients[idx].pid);
     }
 }
 
-// Fonction pour traiter un client
-void traiter_client(int fifo1, int fifo2) {
+
+
+void handle_client(int client_idx) {
     question_t question;
     reponse_t reponse;
     
-    while (1) {
-        // Lire la question
-        ssize_t read_bytes = read(fifo1, &question, sizeof(question_t));
-        if (read_bytes == -1) {
-            if (errno == EINTR) continue;
-            perror("Erreur lecture question");
-            return;
+    // Read request
+    ssize_t bytes_read = read(clients[client_idx].fd_in, &question, sizeof(question_t));
+    if (bytes_read <= 0) {
+        if (bytes_read == 0 || errno != EINTR) {
+            printf("Server: Client %d disconnected\n", clients[client_idx].pid);
+            cleanup_client(client_idx);
         }
-        
-        printf("Serveur [%d] : Question reçue du client %d (demande %d nombres)\n", 
-               getpid(), question.client_id, question.n);
-        
-        // Préparer la réponse
-        reponse.client_id = getpid();
-        reponse.n = question.n;
-        for (int i = 0; i < question.n; i++) {
-            reponse.nombres[i] = rand() % 100;
+        return;
+    }
+
+    printf("Server [%d]: Processing request from client %d (requesting %d numbers)\n",
+           getpid(), question.client_id, question.n);
+
+    // Prepare response
+    reponse.client_id = getpid();
+    reponse.n = question.n;
+    for (int i = 0; i < question.n; i++) {
+        reponse.nombres[i] = rand() % 100;
+    }
+
+    // Send response
+    if (write(clients[client_idx].fd_out, &reponse, sizeof(reponse_t)) == -1) {
+        perror("Server: Error writing response");
+        return;
+    }
+
+    // Signal client
+    if (kill(clients[client_idx].pid, SIGUSR1) == -1) {
+        perror("Server: Error sending signal");
+        return;
+    }
+
+    // Wait for confirmation with timeout
+    encore = 0;
+    time_t start_time = time(NULL);
+    while (!encore && running) {
+        if (time(NULL) - start_time > 5) { // 5 second timeout
+            printf("Server: Timeout waiting for client %d confirmation\n", clients[client_idx].pid);
+            break;
         }
-        
-        // Écrire la réponse
-        printf("Serveur [%d] : Écriture de la réponse pour client %d\n", 
-               getpid(), question.client_id);
-        if (write(fifo2, &reponse, sizeof(reponse_t)) == -1) {
-            perror("Erreur écriture réponse");
-            continue;
-        }
-        
-        // Signaler au client
-        printf("Serveur [%d] : Réveil du client %d\n", getpid(), question.client_id);
-        if (kill(question.client_id, SIGUSR1) == -1) {
-            perror("Erreur envoi signal");
-            continue;
-        }
-        
-        // Attendre la confirmation du client
-        encore = 0;
-        while (!encore) {
-            pause();
-        }
-        
-        printf("Serveur [%d] : Confirmation reçue du client %d\n", 
-               getpid(), question.client_id);
+        sleep(1);
     }
 }
 
 int main() {
-    int fifo1, fifo2;
-    
-    // Initialisation du tableau des clients
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        clients[i].actif = 0;
-    }
-    
-    // Configuration du gestionnaire SIGCHLD
-    struct sigaction sa_chld;
-    sa_chld.sa_handler = handle_sigchld;
-    sigemptyset(&sa_chld.sa_mask);
-    sa_chld.sa_flags = SA_RESTART;
-    if (sigaction(SIGCHLD, &sa_chld, NULL) == -1) {
-        perror("Erreur installation handler SIGCHLD");
-        exit(1);
-    }
-    
-    // Supprime les anciens FIFOs
-    unlink(FIFO1);
-    unlink(FIFO2);
-    
-    // Créer les tubes nommés
-    if (mkfifo(FIFO1, 0666) == -1) {
-        perror("Erreur création FIFO1");
-        exit(1);
-    }
-    if (mkfifo(FIFO2, 0666) == -1) {
-        perror("Erreur création FIFO2");
-        unlink(FIFO1);
-        exit(1);
-    }
-
-    printf("Serveur principal [%d] : Démarrage...\n", getpid());
-    
-    // Initialiser le générateur de nombres aléatoires
-    srand(time(NULL));
-    
-    // Ouvrir les tubes nommés
-    printf("Serveur : Ouverture des FIFOs...\n");
-    
-    fifo1 = open(FIFO1, O_RDONLY | O_NONBLOCK);
-    if (fifo1 == -1) {
-        perror("Erreur ouverture FIFO1");
-        exit(1);
-    }
-    
-    fifo2 = open(FIFO2, O_WRONLY);
-    if (fifo2 == -1) {
-        perror("Erreur ouverture FIFO2");
-        close(fifo1);
-        exit(1);
-    }
-    
-    // Installer les gestionnaires de signaux
+    int registry_fd;
     struct sigaction sa;
+
+    // Initialize client array
+    memset(clients, 0, sizeof(clients));
+
+    // Setup signal handlers
     sa.sa_handler = hand_reveil;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     
     if (sigaction(SIGUSR1, &sa, NULL) == -1) {
-        perror("Erreur installation handler SIGUSR1");
+        perror("Server: Error setting up SIGUSR1 handler");
         exit(1);
     }
-    
+
     sa.sa_handler = fin_serveur;
     if (sigaction(SIGINT, &sa, NULL) == -1) {
-        perror("Erreur installation handler SIGINT");
+        perror("Server: Error setting up SIGINT handler");
         exit(1);
     }
+
+    // Create server registry FIFO
+    unlink(SERVER_REGISTRY);
+    if (mkfifo(SERVER_REGISTRY, 0666) == -1) {
+        perror("Server: Error creating registry FIFO");
+        exit(1);
+    }
+
+    printf("Server [%d]: Starting...\n", getpid());
     
-    // Boucle principale pour accepter de nouveaux clients
-    while (1) {
-        if (nb_clients < MAX_CLIENTS) {
-            pid_t pid = fork();
-            
-            if (pid == -1) {
-                perror("Erreur fork");
-                continue;
+    // Open registry FIFO
+    registry_fd = open(SERVER_REGISTRY, O_RDONLY | O_NONBLOCK);
+    if (registry_fd == -1) {
+        perror("Server: Error opening registry FIFO");
+        exit(1);
+    }
+    // Initialize random number generator
+    srand(time(NULL));
+
+    // Main server loop
+    while (running) {
+        fd_set readfds;
+        struct timeval tv = {1, 0};  // 1 second timeout
+        int max_fd = registry_fd;
+
+        FD_ZERO(&readfds);
+        FD_SET(registry_fd, &readfds);
+
+        // Add active client FDs to set
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].active) {
+                FD_SET(clients[i].fd_in, &readfds);
+                max_fd = (clients[i].fd_in > max_fd) ? clients[i].fd_in : max_fd;
             }
-            
-            if (pid == 0) {  // Processus fils
-                // Configuration spécifique au processus fils
-                printf("Serveur : Nouveau processus fils créé [%d]\n", getpid());
-                traiter_client(fifo1, fifo2);
-                exit(0);
-            } else {  // Processus parent
-                // Enregistrer le nouveau client
-                for (int i = 0; i < MAX_CLIENTS; i++) {
-                    if (!clients[i].actif) {
-                        clients[i].pid = pid;
-                        clients[i].actif = 1;
-                        nb_clients++;
-                        break;
+        }
+
+        int ready = select(max_fd + 1, &readfds, NULL, NULL, &tv);
+        if (ready == -1 && errno != EINTR) {
+            perror("Server: Select error");
+            continue;
+        }
+
+        // Check for new client registrations
+        if (FD_ISSET(registry_fd, &readfds)) {
+            pid_t new_client_pid;
+            if (read(registry_fd, &new_client_pid, sizeof(pid_t)) > 0) {
+                if (nb_clients < MAX_CLIENTS) {
+                    // Find empty slot
+                    int idx = 0;
+                    while (idx < MAX_CLIENTS && clients[idx].active) idx++;
+
+                    if (idx < MAX_CLIENTS) {
+                        // Setup client FIFOs
+                        snprintf(clients[idx].fifo_in, sizeof(clients[idx].fifo_in),
+                                "%s%d_in", FIFO_BASE, new_client_pid);
+                        snprintf(clients[idx].fifo_out, sizeof(clients[idx].fifo_out),
+                                "%s%d_out", FIFO_BASE, new_client_pid);
+
+                        // Open FIFOs
+                        clients[idx].fd_in = open(clients[idx].fifo_in, O_RDONLY | O_NONBLOCK);
+                        clients[idx].fd_out = open(clients[idx].fifo_out, O_WRONLY);
+
+                        if (clients[idx].fd_in != -1 && clients[idx].fd_out != -1) {
+                            clients[idx].pid = new_client_pid;
+                            clients[idx].active = 1;
+                            nb_clients++;
+                            printf("Server: New client connected (PID: %d)\n", new_client_pid);
+                        }
                     }
                 }
             }
         }
-        
-        // Attente courte avant de vérifier à nouveau
-        sleep(1);
+        // Handle client requests
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].active && FD_ISSET(clients[i].fd_in, &readfds)) {
+                handle_client(i);
+            }
+        }
     }
-    
-    // Nettoyage
-    close(fifo1);
-    close(fifo2);
-    unlink(FIFO1);
-    unlink(FIFO2);
-    
+
+    // Cleanup
+    printf("Server: Shutting down...\n");
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        cleanup_client(i);
+    }
+    close(registry_fd);
+    unlink(SERVER_REGISTRY);
+
     return 0;
 }

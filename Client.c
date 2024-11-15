@@ -1,4 +1,4 @@
- #define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
+#include <string.h>
 #include "serv_cli_fifo.h"
 
 // Variable globale pour le suivi
@@ -31,9 +32,18 @@ void print_timestamp() {
 }
 
 int main(int argc, char *argv[]) {
-    int fifo1, fifo2;
+    (void)argc;  // Suppress unused parameter warning
+    (void)argv;  // Suppress unused parameter warning
+    
+    int registry_fd, fd_in, fd_out;
     question_t question;
     reponse_t reponse;
+    char fifo_in[128], fifo_out[128];
+    pid_t pid = getpid();
+
+    // Construction des noms de FIFO pour ce client
+    snprintf(fifo_in, sizeof(fifo_in), "%s%d_in", FIFO_BASE, pid);
+    snprintf(fifo_out, sizeof(fifo_out), "%s%d_out", FIFO_BASE, pid);
 
     // Configuration du gestionnaire de signal
     struct sigaction sa;
@@ -48,40 +58,77 @@ int main(int argc, char *argv[]) {
     }
 
     print_timestamp();
-    printf("[CLIENT %d] Démarrage du client\n", getpid());
+    printf("[CLIENT %d] Démarrage du client\n", pid);
+
+    // Création des FIFOs client
+    if (mkfifo(fifo_in, 0666) == -1 && errno != EEXIST) {
+        print_timestamp();
+        perror("[CLIENT] Erreur création FIFO in");
+        exit(EXIT_FAILURE);
+    }
+
+    if (mkfifo(fifo_out, 0666) == -1 && errno != EEXIST) {
+        print_timestamp();
+        perror("[CLIENT] Erreur création FIFO out");
+        unlink(fifo_in);
+        exit(EXIT_FAILURE);
+    }
+
+    // Ouverture du FIFO registry pour enregistrement auprès du serveur
+    print_timestamp();
+    printf("[CLIENT %d] Tentative d'ouverture du registry (%s)\n", pid, SERVER_REGISTRY);
+    
+    registry_fd = open(SERVER_REGISTRY, O_WRONLY);
+    if (registry_fd == -1) {
+        print_timestamp();
+        perror("[CLIENT] Échec ouverture registry");
+        unlink(fifo_in);
+        unlink(fifo_out);
+        exit(EXIT_FAILURE);
+    }
+
+    // Envoi du PID au serveur via le registry
+    if (write(registry_fd, &pid, sizeof(pid_t)) == -1) {
+        print_timestamp();
+        perror("[CLIENT] Échec envoi PID au registry");
+        close(registry_fd);
+        unlink(fifo_in);
+        unlink(fifo_out);
+        exit(EXIT_FAILURE);
+    }
+    close(registry_fd);
+
+    // Ouverture des FIFOs client
+    print_timestamp();
+    printf("[CLIENT %d] Tentative d'ouverture du FIFO in (%s)\n", pid, fifo_in);
+    
+    fd_in = open(fifo_in, O_RDONLY);
+    if (fd_in == -1) {
+        print_timestamp();
+        perror("[CLIENT] Échec ouverture FIFO in");
+        unlink(fifo_in);
+        unlink(fifo_out);
+        exit(EXIT_FAILURE);
+    }
+
+    print_timestamp();
+    printf("[CLIENT %d] Tentative d'ouverture du FIFO out (%s)\n", pid, fifo_out);
+    
+    fd_out = open(fifo_out, O_WRONLY);
+    if (fd_out == -1) {
+        print_timestamp();
+        perror("[CLIENT] Échec ouverture FIFO out");
+        close(fd_in);
+        unlink(fifo_in);
+        unlink(fifo_out);
+        exit(EXIT_FAILURE);
+    }
 
     // Initialisation du générateur de nombres aléatoires
-    srand(time(NULL) + getpid());
-
-    // Ouverture du tube FIFO1 (écriture)
-    print_timestamp();
-    printf("[CLIENT %d] Tentative d'ouverture du tube FIFO1 (%s)\n", getpid(), FIFO1);
-    
-    fifo1 = open(FIFO1, O_WRONLY);
-    if (fifo1 == -1) {
-        print_timestamp();
-        perror("[CLIENT] Échec ouverture FIFO1");
-        exit(EXIT_FAILURE);
-    }
-    print_timestamp();
-    printf("[CLIENT %d] FIFO1 ouvert avec succès (fd=%d)\n", getpid(), fifo1);
-
-    // Ouverture du tube FIFO2 (lecture)
-    print_timestamp();
-    printf("[CLIENT %d] Tentative d'ouverture du tube FIFO2 (%s)\n", getpid(), FIFO2);
-    
-    fifo2 = open(FIFO2, O_RDONLY);
-    if (fifo2 == -1) {
-        print_timestamp();
-        perror("[CLIENT] Échec ouverture FIFO2");
-        close(fifo1);
-        exit(EXIT_FAILURE);
-    }
-    print_timestamp();
-    printf("[CLIENT %d] FIFO2 ouvert avec succès (fd=%d)\n", getpid(), fifo2);
+    srand(time(NULL) + pid);
 
     // Préparation de la question
-    question.client_id = getpid();
+    question.client_id = pid;
     question.n = rand() % NMAX + 1;
 
     print_timestamp();
@@ -89,12 +136,14 @@ int main(int argc, char *argv[]) {
            question.client_id, question.n);
 
     // Envoi de la question
-    ssize_t write_result = write(fifo1, &question, sizeof(question_t));
+    ssize_t write_result = write(fd_out, &question, sizeof(question_t));
     if (write_result == -1) {
         print_timestamp();
         perror("[CLIENT] Erreur envoi question");
-        close(fifo1);
-        close(fifo2);
+        close(fd_in);
+        close(fd_out);
+        unlink(fifo_in);
+        unlink(fifo_out);
         exit(EXIT_FAILURE);
     }
     print_timestamp();
@@ -113,12 +162,14 @@ int main(int argc, char *argv[]) {
     print_timestamp();
     printf("[CLIENT %d] Tentative de lecture de la réponse\n", question.client_id);
     
-    ssize_t read_result = read(fifo2, &reponse, sizeof(reponse_t));
+    ssize_t read_result = read(fd_in, &reponse, sizeof(reponse_t));
     if (read_result == -1) {
         print_timestamp();
         perror("[CLIENT] Erreur lecture réponse");
-        close(fifo1);
-        close(fifo2);
+        close(fd_in);
+        close(fd_out);
+        unlink(fifo_in);
+        unlink(fifo_out);
         exit(EXIT_FAILURE);
     }
     print_timestamp();
@@ -144,12 +195,14 @@ int main(int argc, char *argv[]) {
         printf("[CLIENT %d] Signal de confirmation envoyé avec succès\n", question.client_id);
     }
 
-    // Fermeture des tubes
+    // Nettoyage et fermeture
     print_timestamp();
     printf("[CLIENT %d] Fermeture des tubes\n", question.client_id);
     
-    close(fifo1);
-    close(fifo2);
+    close(fd_in);
+    close(fd_out);
+    unlink(fifo_in);
+    unlink(fifo_out);
 
     print_timestamp();
     printf("[CLIENT %d] Terminaison du client\n", question.client_id);

@@ -1,3 +1,4 @@
+// handlers_serv.h
 #ifndef HANDLERS_SERV_H
 #define HANDLERS_SERV_H
 
@@ -7,12 +8,13 @@
 #include <signal.h>
 #include <stdio.h>
 
-// Variable globale pour indiquer que le serveur doit continuer
+// Global variable to indicate server should continue
 volatile sig_atomic_t encore = 0;
+volatile sig_atomic_t running = 1;
 
 /**
- * Gestionnaire du signal SIGUSR1 pour le réveil du serveur.
- * @param sig Le signal reçu (SIGUSR1).
+ * Handler for SIGUSR1 signal to wake up the server.
+ * @param sig Received signal (SIGUSR1).
  */
 void hand_reveil(int sig) {
     if (sig == SIGUSR1) {
@@ -21,11 +23,12 @@ void hand_reveil(int sig) {
 }
 
 /**
- * Gestionnaire des signaux pour la fin du serveur.
- * @param sig Le signal reçu (peu importe lequel).
+ * Signal handler for server termination.
+ * @param sig Received signal.
  */
 void fin_serveur(int sig) {
-    (void)sig;  // Pour éviter l'avertissement de paramètre non utilisé
+    (void)sig;  // Avoid unused parameter warning
+    running = 0;
     encore = 0;
 }
 
